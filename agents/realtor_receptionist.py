@@ -202,9 +202,11 @@ async def entrypoint(ctx):
             ),
         ),
     )
-    # Direct TTS greeting — skips the LLM roundtrip entirely. Saves 1-2s and
-    # guarantees the brokerage name is pronounced exactly as typed.
-    await session.say(greeting_text, allow_interruptions=True)
+    # Greeting via generate_reply — session.say() was hanging silently on
+    # livekit-agents 1.5.4 (no logs, no speech, no error). Fallback pattern
+    # works reliably even if slightly slower. greeting_text is embedded in
+    # the instructions so the LLM still says the exact brokerage name.
+    await session.generate_reply(instructions=greeting)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,8 @@ export async function POST(req) {
   const roomName = body.room_name || `realtor-demo-${Date.now()}`;
   const identity = body.participant_identity || `caller-${Date.now()}`;
   const participantName = body.participant_name || "Demo Caller";
+  const brand = (body.brand || "").toString().slice(0, 200);
+  const brief = (body.brief || "").toString().slice(0, 6000); // hard cap for metadata safety
 
   const at = new AccessToken(apiKey, apiSecret, {
     identity,
@@ -33,13 +35,18 @@ export async function POST(req) {
     canPublishData: true,
   });
 
+  // Room metadata carries the personalization brief so the agent can read it on_enter.
+  const roomMetadata = brief ? JSON.stringify({ brand, brief }) : "";
+
   at.roomConfig = {
     agents: [{ agentName: "mia-realtor" }],
+    metadata: roomMetadata,
   };
 
   return Response.json({
     serverUrl: livekitUrl,
     participantToken: await at.toJwt(),
     roomName,
+    personalized: Boolean(brief),
   });
 }

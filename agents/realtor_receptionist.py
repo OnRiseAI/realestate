@@ -6,6 +6,7 @@ demo (they log + return success); production deployment swaps in real CRM/calend
 integrations.
 """
 
+import json
 import logging
 from livekit import rtc
 from livekit.agents import (
@@ -51,22 +52,25 @@ Voice principles:
   with [Agent Name] — I can answer questions and book showings just like a person
   on the team would."
 
-You are demonstrating the product on the website voiceaireceptionist.com.
-The demo Realtor is "Jordan from Sunbelt Realty" in Austin, TX.
+You are demonstrating the product on the website voiceaireceptionists.com.
+The demo Realtor is "Jordan from Sunbelt Realty" in Austin, TX — UNLESS
+personalization overrides are supplied below.
 """
 
 
+DEFAULT_GREETING = (
+    "Greet the caller warmly. Say: 'Sunbelt Realty, this is Mia — "
+    "how can I help you today?' Keep it under one breath."
+)
+
+
 class RealtorReceptionist(Agent):
-    def __init__(self):
-        super().__init__(instructions=SYSTEM_PROMPT)
+    def __init__(self, instructions: str = SYSTEM_PROMPT, greeting: str = DEFAULT_GREETING):
+        super().__init__(instructions=instructions)
+        self._greeting = greeting
 
     async def on_enter(self):
-        await self.session.generate_reply(
-            instructions=(
-                "Greet the caller warmly. Say: 'Sunbelt Realty, this is Mia — "
-                "how can I help you today?' Keep it under one breath."
-            )
-        )
+        await self.session.generate_reply(instructions=self._greeting)
 
     @function_tool()
     async def schedule_showing(
@@ -136,8 +140,46 @@ class RealtorReceptionist(Agent):
 server = AgentServer()
 
 
+def _build_personalized_instructions(brand: str, brief: str) -> tuple[str, str]:
+    """Turn the scraped website brief into a custom system prompt + greeting for this session."""
+    brand_clean = (brand or "").strip() or "your brokerage"
+    personalized_prompt = (
+        SYSTEM_PROMPT
+        + "\n\n---\n"
+        + f"PERSONALIZATION OVERRIDE:\n"
+        + f"For this session, you are the AI receptionist for {brand_clean}. "
+        + "Use the brand name, style, and information below to answer questions naturally. "
+        + "If asked about a specific property or service mentioned on their website, cite details "
+        + "from the brief. If asked about something NOT in the brief, say honestly that you'd need "
+        + "to pass that on to the agent and offer to take a message.\n\n"
+        + "WEBSITE BRIEF (this is cheat-sheet context, NOT a script):\n"
+        + brief.strip()
+    )
+    personalized_greeting = (
+        f"Greet the caller warmly as the receptionist for {brand_clean}. "
+        f"Say something like '{brand_clean}, this is Mia — how can I help you today?' "
+        "Keep it under one breath."
+    )
+    return personalized_prompt, personalized_greeting
+
+
 @server.rtc_session(agent_name="mia-realtor")
 async def entrypoint(ctx):
+    # Read personalization from room metadata if the token endpoint set it.
+    instructions = SYSTEM_PROMPT
+    greeting = DEFAULT_GREETING
+    raw_metadata = getattr(ctx.room, "metadata", "") or ""
+    if raw_metadata:
+        try:
+            meta = json.loads(raw_metadata)
+            brief = (meta.get("brief") or "").strip()
+            brand = (meta.get("brand") or "").strip()
+            if brief:
+                instructions, greeting = _build_personalized_instructions(brand, brief)
+                log.info("Personalized session for brand=%r (brief chars=%d)", brand, len(brief))
+        except Exception as err:
+            log.warning("Failed to parse room metadata: %s", err)
+
     session = AgentSession(
         stt="deepgram/flux-general",
         llm="openai/gpt-5-mini",
@@ -147,7 +189,7 @@ async def entrypoint(ctx):
     )
     await session.start(
         room=ctx.room,
-        agent=RealtorReceptionist(),
+        agent=RealtorReceptionist(instructions=instructions, greeting=greeting),
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=lambda p: (

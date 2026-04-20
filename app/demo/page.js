@@ -2,7 +2,7 @@
 
 import { motion } from "framer-motion";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import LiveKitDemo from "../components/LiveKitDemo";
 
 export default function DemoPage() {
@@ -10,7 +10,13 @@ export default function DemoPage() {
   const [personalizing, setPersonalizing] = useState(false);
   const [brand, setBrand] = useState("");
   const [brief, setBrief] = useState("");
+  const [catalogId, setCatalogId] = useState("");
+  const [domain, setDomain] = useState("");
+  const [lightCount, setLightCount] = useState(0);
+  const [fullCount, setFullCount] = useState(0);
+  const [indexStatus, setIndexStatus] = useState("idle");
   const [error, setError] = useState("");
+  const pollRef = useRef(null);
 
   async function handlePersonalize(e) {
     e.preventDefault();
@@ -18,6 +24,11 @@ export default function DemoPage() {
     setError("");
     setBrand("");
     setBrief("");
+    setCatalogId("");
+    setDomain("");
+    setLightCount(0);
+    setFullCount(0);
+    setIndexStatus("idle");
     try {
       const res = await fetch("/api/personalize", {
         method: "POST",
@@ -28,6 +39,17 @@ export default function DemoPage() {
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
       setBrand(data.brand || "");
       setBrief(data.brief || "");
+      setCatalogId(data.catalogId || "");
+      // derive domain for status polling
+      let d = "";
+      try {
+        const raw = url.match(/^https?:\/\//i) ? url : "https://" + url;
+        d = new URL(raw).hostname.replace(/^www\./, "");
+      } catch {}
+      setDomain(d);
+      setLightCount(data.lightCount || 0);
+      setFullCount(data.fullCount || 0);
+      setIndexStatus(data.fullCatalogStatus || "pending");
     } catch (err) {
       setError(err?.message || "Couldn't personalize");
     } finally {
@@ -35,12 +57,44 @@ export default function DemoPage() {
     }
   }
 
+  // Poll /api/personalize/status every 10s until the full catalog finishes.
+  useEffect(() => {
+    if (!domain || indexStatus === "ready" || indexStatus === "failed") {
+      if (pollRef.current) clearInterval(pollRef.current);
+      return;
+    }
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/personalize/status?domain=${encodeURIComponent(domain)}`);
+        const data = await res.json();
+        if (data.status) setIndexStatus(data.status);
+        if (typeof data.lightCount === "number") setLightCount(data.lightCount);
+        if (typeof data.fullCount === "number") setFullCount(data.fullCount);
+      } catch {}
+    }, 10000);
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [domain, indexStatus]);
+
   function reset() {
     setBrand("");
     setBrief("");
+    setCatalogId("");
+    setDomain("");
+    setLightCount(0);
+    setFullCount(0);
+    setIndexStatus("idle");
     setUrl("");
     setError("");
   }
+
+  const statusPill = (() => {
+    if (indexStatus === "ready") return { label: `Full inventory ready — ${fullCount} listings`, tone: "ready" };
+    if (indexStatus === "failed") return { label: "Full crawl failed — Mia uses the quick scrape", tone: "fail" };
+    if (indexStatus === "pending" && brief) return { label: `Indexing full inventory… Mia has ${lightCount} listings to start`, tone: "pending" };
+    return null;
+  })();
 
   return (
     <section className="max-w-2xl mx-auto py-8">
@@ -54,8 +108,8 @@ export default function DemoPage() {
           Talk to <span className="text-[#2DD4BF]">Mia</span>
         </h1>
         <p className="mt-4 text-[15px] text-[#A0A0AB] leading-relaxed max-w-lg mx-auto">
-          Try the default demo as a Realtor at &ldquo;Sunbelt Realty,&rdquo; or drop in your own website and
-          Mia will personalize for your brokerage — your listings, your brand, your pitch.
+          Try the default demo as a Realtor at &ldquo;Sunbelt Realty,&rdquo; or drop in your own real-estate website and
+          Mia will answer as if she worked there — with your actual listings on hand.
         </p>
       </motion.div>
 
@@ -75,12 +129,21 @@ export default function DemoPage() {
               <span className="text-[11px] font-bold tracking-[0.12em] uppercase text-[#2DD4BF]">Personalized</span>
             </div>
             <h3 className="text-[16px] font-bold text-white mb-1">Mia is ready with <span className="text-[#2DD4BF]">{brand}</span>&rsquo;s info</h3>
-            <p className="text-[13px] text-[#A0A0AB] mb-4">
-              She&rsquo;s read the homepage and will answer as if she worked there. Start the call below.
-            </p>
+            {statusPill && (
+              <div className={`mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold ${
+                statusPill.tone === "ready" ? "bg-[#2DD4BF]/10 text-[#2DD4BF]" :
+                statusPill.tone === "fail" ? "bg-[#F87171]/10 text-[#F87171]" :
+                "bg-[#A0A0AB]/10 text-[#A0A0AB]"
+              }`}>
+                {statusPill.tone === "pending" && (
+                  <span className="inline-block w-2 h-2 rounded-full bg-[#A0A0AB] animate-pulse" />
+                )}
+                {statusPill.label}
+              </div>
+            )}
             <button
               onClick={reset}
-              className="text-[12px] font-semibold text-[#6B6B76] hover:text-[#2DD4BF]"
+              className="mt-4 text-[12px] font-semibold text-[#6B6B76] hover:text-[#2DD4BF] block"
             >
               Use a different website
             </button>
@@ -92,7 +155,8 @@ export default function DemoPage() {
             </div>
             <h3 className="text-[16px] font-bold text-white mb-1">Personalize Mia with your website</h3>
             <p className="text-[13px] text-[#A0A0AB] mb-4">
-              Paste your real estate site and Mia will greet as if she worked there — with your brand and listings on hand.
+              Paste your real estate site. Mia will greet as if she worked there and search your actual listings
+              when callers ask about properties.
             </p>
             <div className="flex gap-2">
               <input
@@ -113,7 +177,8 @@ export default function DemoPage() {
             </div>
             {error && <div className="mt-3 text-[12px] text-[#F87171]">{error}</div>}
             <div className="mt-3 text-[11px] text-[#44444D]">
-              We scrape one page from the URL for the demo only — nothing stored.
+              We scrape public pages and cache for 24h. Mia can answer basic brand questions in ~15s; full inventory
+              index runs in the background and is ready for the next call.
             </div>
           </form>
         )}
@@ -125,7 +190,7 @@ export default function DemoPage() {
         animate={{ opacity: 1, y: 0, scale: 1 }}
         transition={{ duration: 0.6, delay: 0.2, ease: [0.16, 1, 0.3, 1] }}
       >
-        <LiveKitDemo brand={brand} brief={brief} />
+        <LiveKitDemo brand={brand} brief={brief} catalogId={catalogId} domain={domain} />
       </motion.div>
 
       <motion.div
@@ -138,8 +203,11 @@ export default function DemoPage() {
         <ul className="text-[13px] text-[#6B6B76] space-y-2">
           <li>&ldquo;Hi, I saw your listing on Maple Street. Can I see it tomorrow at 5?&rdquo;</li>
           <li>&ldquo;I&rsquo;m thinking of selling my house in 78704. Can someone give me a value?&rdquo;</li>
-          <li>&ldquo;I&rsquo;m pre-approved up to $650K and want to look this weekend.&rdquo;</li>
-          {brief && <li className="text-[#2DD4BF]/70">&ldquo;Tell me about the property on [your actual listing address].&rdquo;</li>}
+          {brief ? (
+            <li className="text-[#2DD4BF]/80">&ldquo;Anything in Marbella under €400,000?&rdquo;</li>
+          ) : (
+            <li>&ldquo;I&rsquo;m pre-approved up to $650K and want to look this weekend.&rdquo;</li>
+          )}
         </ul>
         <Link
           href="/"

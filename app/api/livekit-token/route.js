@@ -20,6 +20,8 @@ export async function POST(req) {
   const participantName = body.participant_name || "Demo Caller";
   const brand = (body.brand || "").toString().slice(0, 200);
   const brief = (body.brief || "").toString().slice(0, 6000); // hard cap for metadata safety
+  const catalogId = (body.catalogId || "").toString().slice(0, 64);
+  const domain = (body.domain || "").toString().slice(0, 200);
 
   const at = new AccessToken(apiKey, apiSecret, {
     identity,
@@ -35,8 +37,11 @@ export async function POST(req) {
     canPublishData: true,
   });
 
-  // Room metadata carries the personalization brief so the agent can read it on_enter.
-  const roomMetadata = brief ? JSON.stringify({ brand, brief }) : "";
+  // Room metadata carries the personalization brief + catalog lookup info so the agent can
+  // read it in entrypoint (brand/brief for persona override; catalogId/domain for runtime search).
+  const roomMetadata = brief
+    ? JSON.stringify({ brand, brief, catalogId, domain })
+    : "";
 
   at.roomConfig = {
     agents: [{ agentName: "mia-realtor" }],

@@ -3,11 +3,15 @@ Mia — voice AI receptionist for the demo Realtor.
 
 Single-agent pattern from livekit-agents SDK. Tools are stubbed for the in-browser
 demo (they log + return success); production deployment swaps in real CRM/calendar
-integrations.
+integrations. The `search_properties` tool is live — it queries our Next.js API
+which reads a per-domain catalog from Vercel KV (Upstash Redis).
 """
 
 import json
 import logging
+import os
+
+import httpx
 from livekit import rtc
 from livekit.agents import (
     Agent,
@@ -23,6 +27,11 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 log = logging.getLogger("realtor-receptionist")
 logging.basicConfig(level=logging.INFO)
+
+
+SEARCH_API_BASE = os.environ.get(
+    "SEARCH_API_BASE", "https://realestate.voiceaireceptionists.com"
+)
 
 
 SYSTEM_PROMPT = """\
@@ -65,9 +74,15 @@ DEFAULT_GREETING = (
 
 
 class RealtorReceptionist(Agent):
-    def __init__(self, instructions: str = SYSTEM_PROMPT, greeting: str = DEFAULT_GREETING):
+    def __init__(
+        self,
+        instructions: str = SYSTEM_PROMPT,
+        greeting: str = DEFAULT_GREETING,
+        domain: str = "",
+    ):
         super().__init__(instructions=instructions)
         self._greeting = greeting
+        self._domain = domain
 
     async def on_enter(self):
         await self.session.generate_reply(instructions=self._greeting)
@@ -83,20 +98,10 @@ class RealtorReceptionist(Agent):
         time: str,
         showing_type: str = "buyer",
     ) -> str:
-        """Book a property showing or CMA appointment into the agent's calendar.
-
-        Args:
-            contact_name: Full name of the caller
-            contact_phone: Best callback number
-            property_address: Street address of the property (or 'TBD' for CMA)
-            date: ISO date YYYY-MM-DD
-            time: Time in HH:MM format, 24h
-            showing_type: 'buyer', 'seller', or 'cma'
-        """
+        """Book a property showing or CMA appointment into the agent's calendar."""
         log.info(
-            "DEMO STUB schedule_showing: %s %s @ %s for %s on %s %s (type=%s)",
-            contact_name, contact_phone, property_address,
-            contact_name, date, time, showing_type,
+            "DEMO STUB schedule_showing: %s %s @ %s on %s %s (type=%s)",
+            contact_name, contact_phone, property_address, date, time, showing_type,
         )
         return (
             f"Showing booked for {contact_name} at {property_address} on "
@@ -124,9 +129,7 @@ class RealtorReceptionist(Agent):
     async def transfer_to_human(self, context: RunContext, reason: str) -> str:
         """Warmly transfer the caller to the live agent."""
         log.info("DEMO STUB transfer_to_human: reason=%s", reason)
-        return (
-            "I'm connecting you to the agent now — please hold for just a moment."
-        )
+        return "I'm connecting you to the agent now — please hold for just a moment."
 
     @function_tool()
     async def send_followup_sms(
@@ -136,13 +139,81 @@ class RealtorReceptionist(Agent):
         log.info("DEMO STUB send_followup_sms: %s -> %s", phone, message)
         return f"Text sent to {phone}."
 
+    @function_tool()
+    async def search_properties(
+        self,
+        context: RunContext,
+        location: str | None = None,
+        min_price: int | None = None,
+        max_price: int | None = None,
+        bedrooms: int | None = None,
+        currency: str | None = None,
+    ) -> str:
+        """Search the brokerage's active inventory for matching properties.
+
+        Use this whenever a caller mentions a location, price range, bedroom count,
+        or property type. Pass only the fields you heard explicitly — leave the
+        rest as None. Returns a short prose summary you can speak aloud. If the
+        search finds nothing, offer to take a message for the team.
+
+        Args:
+            location: City or neighborhood the caller mentioned (e.g. "Marbella")
+            min_price: Lower bound of their budget in whole units (no cents)
+            max_price: Upper bound of their budget in whole units
+            bedrooms: Minimum number of bedrooms
+            currency: Three-letter code if the caller gave one (EUR, USD, GBP, etc.)
+        """
+        if not self._domain:
+            return (
+                "No brokerage inventory is indexed for this demo session. "
+                "Offer to take the caller's details and have the team follow up."
+            )
+
+        payload = {"domain": self._domain}
+        if location: payload["location"] = location
+        if min_price is not None: payload["minPrice"] = min_price
+        if max_price is not None: payload["maxPrice"] = max_price
+        if bedrooms is not None: payload["bedrooms"] = bedrooms
+        if currency: payload["currency"] = currency
+
+        url = f"{SEARCH_API_BASE}/api/search-properties"
+        log.info("search_properties → %s %s", url, payload)
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+            prose = (data.get("prose") or "").strip()
+            if prose:
+                return prose
+            return (
+                "Couldn't pull anything back from the inventory right now. "
+                "Offer to take their details and circle back."
+            )
+        except Exception as err:
+            log.warning("search_properties failed: %s", err)
+            return (
+                "The inventory system isn't responding right now. Take the caller's "
+                "preferences and let them know someone will reach out."
+            )
+
 
 server = AgentServer()
 
 
-def _build_personalized_instructions(brand: str, brief: str) -> tuple[str, str]:
+def _build_personalized_instructions(brand: str, brief: str, has_catalog: bool) -> tuple[str, str]:
     """Turn the scraped website brief into a custom system prompt + greeting for this session."""
     brand_clean = (brand or "").strip() or "your brokerage"
+    search_guidance = (
+        "\n\nYou have a live `search_properties` tool wired to the brokerage's actual inventory. "
+        "When a caller mentions a location, price range, or bedroom count, call the tool with "
+        "the fields you heard (leave others blank). Describe the top match(es) naturally — give "
+        "address or neighborhood, price, and bedrooms. Offer to book a viewing. If the search "
+        "returns nothing, take a message and promise the team will follow up. NEVER invent "
+        "listings that the tool didn't return."
+    ) if has_catalog else ""
+
     personalized_prompt = (
         SYSTEM_PROMPT
         + "\n\n---\n"
@@ -151,8 +222,9 @@ def _build_personalized_instructions(brand: str, brief: str) -> tuple[str, str]:
         + "Use the brand name, style, and information below to answer questions naturally. "
         + "If asked about a specific property or service mentioned on their website, cite details "
         + "from the brief. If asked about something NOT in the brief, say honestly that you'd need "
-        + "to pass that on to the agent and offer to take a message.\n\n"
-        + "WEBSITE BRIEF (this is cheat-sheet context, NOT a script):\n"
+        + "to pass that on to the agent and offer to take a message."
+        + search_guidance
+        + "\n\nWEBSITE BRIEF (this is cheat-sheet context, NOT a script):\n"
         + brief.strip()
     )
     personalized_greeting = (
@@ -168,15 +240,22 @@ async def entrypoint(ctx):
     # Read personalization from room metadata if the token endpoint set it.
     instructions = SYSTEM_PROMPT
     greeting = DEFAULT_GREETING
+    domain = ""
     raw_metadata = getattr(ctx.room, "metadata", "") or ""
     if raw_metadata:
         try:
             meta = json.loads(raw_metadata)
             brief = (meta.get("brief") or "").strip()
             brand = (meta.get("brand") or "").strip()
+            domain = (meta.get("domain") or "").strip()
             if brief:
-                instructions, greeting = _build_personalized_instructions(brand, brief)
-                log.info("Personalized session for brand=%r (brief chars=%d)", brand, len(brief))
+                instructions, greeting = _build_personalized_instructions(
+                    brand, brief, has_catalog=bool(domain)
+                )
+                log.info(
+                    "Personalized session: brand=%r brief=%d domain=%r",
+                    brand, len(brief), domain,
+                )
         except Exception as err:
             log.warning("Failed to parse room metadata: %s", err)
 
@@ -189,7 +268,9 @@ async def entrypoint(ctx):
     )
     await session.start(
         room=ctx.room,
-        agent=RealtorReceptionist(instructions=instructions, greeting=greeting),
+        agent=RealtorReceptionist(
+            instructions=instructions, greeting=greeting, domain=domain
+        ),
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=lambda p: (

@@ -8,15 +8,15 @@ integrations.
 
 import json
 import logging
+import re
+from pathlib import Path
 
 from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
-    RunContext,
     TurnHandlingOptions,
-    function_tool,
     room_io,
 )
 from livekit.plugins import noise_cancellation, silero
@@ -26,103 +26,73 @@ log = logging.getLogger("realtor-receptionist")
 logging.basicConfig(level=logging.INFO)
 
 
-SYSTEM_PROMPT = """\
-You are Mia, the AI receptionist for a busy real estate agent in the United States.
+# ────────────────────────────────────────────────────────────────────
+# Prompt files live alongside this script in ./prompts/
+# Edit the .md files, redeploy with `lk agent deploy`. No Python needed.
+# ────────────────────────────────────────────────────────────────────
 
-Your job is to:
-1. Answer every inbound call in under one ring with warmth and professionalism.
-2. Qualify the caller — buyer, seller, renter, or vendor — and gather:
-   - Full name and best callback number
-   - Property address (if calling about a specific listing)
-   - Buying timeline OR selling timeline
-   - Pre-approval status (buyers) OR home value expectations (sellers)
-3. If the caller is a qualified buyer, propose 2-3 showing time slots and book
-   one using the `schedule_showing` tool.
-4. If they are a qualified seller, book a CMA appointment with the agent using
-   the `schedule_showing` tool with type="cma".
-5. If you genuinely cannot help (legal questions, contract negotiation, hostile
-   callers), use `transfer_to_human` and explain you're connecting them.
-6. Always confirm details verbally before logging anything.
-
-Voice principles:
-- Speak naturally. Use contractions. Vary sentence length.
-- Never use markdown, asterisks, or formatting characters. You are heard, not read.
-- Keep responses under two sentences unless the caller explicitly asks for detail.
-- If the caller interrupts, stop talking immediately and listen.
-- Never claim to be human. If asked, say: "I'm Mia, an AI receptionist working
-  with [Agent Name] — I can answer questions and book showings just like a person
-  on the team would."
-
-You are demonstrating the product on the website voiceaireceptionists.com.
-The demo Realtor is "Jordan from Sunbelt Realty" in Austin, TX — UNLESS
-personalization overrides are supplied below.
-"""
+_PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
-DEFAULT_GREETING_TEXT = "Sunbelt Realty, this is Mia — how can I help you today?"
+def _read_prompt_file(filename: str) -> str:
+    try:
+        return (_PROMPTS_DIR / filename).read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        log.warning("Prompt file missing: %s", filename)
+        return ""
+
+
+def _parse_greetings(raw: str) -> tuple[str, str]:
+    """Pull default + personalized greeting lines out of greeting.md.
+    The file has two markdown sections; we grab the first non-header line under each H2."""
+    default, personalized = "", ""
+    current = None
+    for line in raw.splitlines():
+        s = line.strip()
+        if s.lower().startswith("## default"):
+            current = "default"
+            continue
+        if s.lower().startswith("## personalized"):
+            current = "personalized"
+            continue
+        if s.startswith("#") or s.startswith("---") or not s:
+            continue
+        # Skip lines that are obviously instruction text, not the greeting itself.
+        if "`{name}`" in s or "placeholder" in s.lower() or "replaced" in s.lower():
+            continue
+        if current == "default" and not default:
+            default = s
+        elif current == "personalized" and not personalized:
+            personalized = s
+    return default, personalized
+
+
+SYSTEM_PROMPT = _read_prompt_file("system.md")
+_GREETING_RAW = _read_prompt_file("greeting.md")
+DEFAULT_GREETING_TEXT, PERSONALIZED_GREETING_TEMPLATE = _parse_greetings(_GREETING_RAW)
+PERSONALIZATION_OVERRIDE = _read_prompt_file("personalization.md")
+
+# Fallbacks if any file is missing or malformed.
+if not DEFAULT_GREETING_TEXT:
+    DEFAULT_GREETING_TEXT = "Sunbelt Realty, this is Mia — how can I help you today?"
+if not PERSONALIZED_GREETING_TEMPLATE:
+    PERSONALIZED_GREETING_TEMPLATE = "{name}, this is Mia — how can I help you today?"
+
 DEFAULT_GREETING = f"Greet the caller warmly. Say: '{DEFAULT_GREETING_TEXT}' Keep it under one breath."
 
 
 class RealtorReceptionist(Agent):
+    """Simple voice receptionist. Reads prompts from markdown, echoes the
+    business name in the greeting. No function tools, no CRM writes, no
+    scheduling — just conversation."""
+
     def __init__(self, instructions: str = SYSTEM_PROMPT, greeting: str = DEFAULT_GREETING):
         super().__init__(instructions=instructions)
         self._greeting = greeting
 
     async def on_enter(self):
-        # Kept as safety net — primary greeting fires explicitly after session.start.
+        # Primary greeting fires explicitly after session.start in entrypoint.
         pass
-
-    @function_tool()
-    async def schedule_showing(
-        self,
-        context: RunContext,
-        contact_name: str,
-        contact_phone: str,
-        property_address: str,
-        date: str,
-        time: str,
-        showing_type: str = "buyer",
-    ) -> str:
-        """Book a property showing or CMA appointment into the agent's calendar."""
-        log.info(
-            "DEMO STUB schedule_showing: %s %s @ %s on %s %s (type=%s)",
-            contact_name, contact_phone, property_address, date, time, showing_type,
-        )
-        return (
-            f"Showing booked for {contact_name} at {property_address} on "
-            f"{date} at {time}. The agent will receive a calendar invite."
-        )
-
-    @function_tool()
-    async def qualify_lead(
-        self,
-        context: RunContext,
-        name: str,
-        phone: str,
-        intent: str,
-        timeline: str,
-        financing: str = "unknown",
-    ) -> str:
-        """Log a qualified lead into the CRM (stubbed for demo)."""
-        log.info(
-            "DEMO STUB qualify_lead: %s | %s | intent=%s | timeline=%s | financing=%s",
-            name, phone, intent, timeline, financing,
-        )
-        return f"Lead logged: {name} ({phone}) — {intent}, timeline {timeline}."
-
-    @function_tool()
-    async def transfer_to_human(self, context: RunContext, reason: str) -> str:
-        """Warmly transfer the caller to the live agent."""
-        log.info("DEMO STUB transfer_to_human: reason=%s", reason)
-        return "I'm connecting you to the agent now — please hold for just a moment."
-
-    @function_tool()
-    async def send_followup_sms(
-        self, context: RunContext, phone: str, message: str
-    ) -> str:
-        """Send the caller a text message confirming next steps."""
-        log.info("DEMO STUB send_followup_sms: %s -> %s", phone, message)
-        return f"Text sent to {phone}."
 
 
 def prewarm(proc):
@@ -135,17 +105,18 @@ server = AgentServer(setup_fnc=prewarm)
 
 
 def _build_personalized_instructions(business_name: str) -> tuple[str, str, str]:
-    """Session-specific system prompt + greeting + direct greeting text."""
+    """Session-specific system prompt + greeting + direct greeting text.
+    Pulls templates from prompts/personalization.md and prompts/greeting.md,
+    substituting `{name}` with the typed brokerage name."""
     name = (business_name or "").strip() or "your brokerage"
+    override_text = PERSONALIZATION_OVERRIDE.replace("{name}", name) if PERSONALIZATION_OVERRIDE else ""
     personalized_prompt = (
         SYSTEM_PROMPT
         + "\n\n---\n"
         + f"PERSONALIZATION OVERRIDE:\n"
-        + f"For this session, you are the AI receptionist for {name}. "
-        + f"Whenever you would mention the brokerage by name, say '{name}'. "
-        + f"Whenever you would name the agent, say they are a Realtor at {name}."
+        + override_text
     )
-    greeting_text = f"{name}, this is Mia — how can I help you today?"
+    greeting_text = PERSONALIZED_GREETING_TEMPLATE.replace("{name}", name)
     personalized_greeting_instr = (
         f"Greet the caller warmly as the receptionist for {name}. "
         f"Say: '{greeting_text}' Keep it under one breath."

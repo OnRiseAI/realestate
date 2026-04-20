@@ -34,7 +34,7 @@ export async function POST(req) {
   });
 
   at.roomConfig = {
-    agents: [{ agentName: "realtor-receptionist" }],
+    agents: [{ agentName: "mia-realtor" }],
   };
 
   return Response.json({

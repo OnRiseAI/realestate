@@ -4,17 +4,9 @@ version = "0.1.0"
 description = "Mia — voice AI receptionist for Realtors (LiveKit Agent)"
 requires-python = ">=3.10"
 dependencies = [
-    "livekit-agents>=1.5.0",
-    "livekit-plugins-deepgram>=1.5.0",
-    "livekit-plugins-openai>=1.5.0",
-    "livekit-plugins-cartesia>=1.5.0",
-    "livekit-plugins-silero>=1.5.0",
-    "livekit-plugins-noise-cancellation>=1.5.0",
-    "livekit-plugins-turn-detector>=1.5.0",
+    "livekit-agents[deepgram,openai,cartesia,silero,turn-detector,noise-cancellation]~=1.5",
+    "livekit-plugins-noise-cancellation>=0.2.5",
 ]
 
 [project.scripts]
 realtor-receptionist = "realtor_receptionist:server.run"
-
-[tool.uv]
-dev-dependencies = []

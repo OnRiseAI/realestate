@@ -136,7 +136,7 @@ class RealtorReceptionist(Agent):
 server = AgentServer()
 
 
-@server.rtc_session(agent_name="realtor-receptionist")
+@server.rtc_session(agent_name="mia-realtor")
 async def entrypoint(ctx):
     session = AgentSession(
         stt="deepgram/flux-general",
@@ -162,4 +162,5 @@ async def entrypoint(ctx):
 
 
 if __name__ == "__main__":
-    server.run()
+    from livekit.agents import cli
+    cli.run_app(server)

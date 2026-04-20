@@ -240,11 +240,20 @@ def _build_personalized_instructions(brand: str, brief: str, has_catalog: bool) 
 
 @server.rtc_session(agent_name="mia-realtor")
 async def entrypoint(ctx):
-    # Read personalization from room metadata if the token endpoint set it.
+    # Per-session data travels on the agent dispatch, read via ctx.job.metadata.
+    # Also fall back to room metadata for safety.
     instructions = SYSTEM_PROMPT
     greeting = DEFAULT_GREETING
     domain = ""
-    raw_metadata = getattr(ctx.room, "metadata", "") or ""
+    raw_metadata = ""
+    for source in ("job", "room"):
+        obj = ctx.job if source == "job" else getattr(ctx, "room", None)
+        val = getattr(obj, "metadata", "") if obj is not None else ""
+        if val:
+            raw_metadata = val
+            log.info("Using %s metadata (%d chars)", source, len(val))
+            break
+
     if raw_metadata:
         try:
             meta = json.loads(raw_metadata)
@@ -260,7 +269,9 @@ async def entrypoint(ctx):
                     brand, len(brief), domain,
                 )
         except Exception as err:
-            log.warning("Failed to parse room metadata: %s", err)
+            log.warning("Failed to parse metadata: %s", err)
+    else:
+        log.info("No session metadata found — using default Sunbelt persona")
 
     session = AgentSession(
         stt="deepgram/flux-general",

@@ -67,9 +67,15 @@ export async function POST(req) {
 
   const catId = catalogId(domain);
 
-  // 1. Cache check — return fast if fresh.
+  // 1. Cache check — only return cached if we have something worth serving.
+  // Bust stale entries where lightCatalog is empty (usually a failed extract) so
+  // the next visit triggers a fresh scrape with the latest code.
   const cached = await getCatalog(domain);
-  if (cached && isFresh(cached) && cached.brief) {
+  const cachedHasListings =
+    cached &&
+    ((cached.lightCatalog || []).length > 0 ||
+      (cached.fullCatalogStatus === "ready" && (cached.fullCatalog || []).length > 0));
+  if (cached && isFresh(cached) && cached.brief && cachedHasListings) {
     return Response.json({
       ok: true,
       cached: true,

@@ -37,15 +37,15 @@ export async function POST(req) {
     canPublishData: true,
   });
 
-  // Room metadata carries the personalization brief + catalog lookup info so the agent can
-  // read it in entrypoint (brand/brief for persona override; catalogId/domain for runtime search).
-  const roomMetadata = brief
+  // Per-session data travels on the agent dispatch (not room metadata). The Python agent
+  // reads this via ctx.job.metadata in entrypoint. Room-level metadata does NOT propagate
+  // reliably to dispatched agents — this is a gotcha in livekit-agents v1.5.
+  const dispatchMetadata = brief
     ? JSON.stringify({ brand, brief, catalogId, domain })
     : "";
 
   at.roomConfig = {
-    agents: [{ agentName: "mia-realtor" }],
-    metadata: roomMetadata,
+    agents: [{ agentName: "mia-realtor", metadata: dispatchMetadata }],
   };
 
   return Response.json({
